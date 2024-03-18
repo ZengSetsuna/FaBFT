@@ -223,3 +223,33 @@ func (s *vertexRoundSet) SetDelivered(a commons.Address, delivered bool) {
 func (s *vertexRoundSet) Size() int {
 	return len(s.internal)
 }
+
+// FindTips returns the tips of the DAG.
+func (dag *dag) FindTips() []commons.Vertex {
+	tips := make([]commons.Vertex, 0)
+
+	// Iterate through all vertices in the DAG
+	for round, roundSet := range dag.internal {
+		for _, vertex := range roundSet.Entries() {
+			// Check if the vertex has no descendants
+			if dag.isTip(round, vertex) {
+				tips = append(tips, vertex)
+			}
+		}
+	}
+
+	return tips
+}
+
+// isTip checks if the vertex is a tip (has no descendants).
+func (dag *dag) isTip(round commons.Round, vertex commons.Vertex) bool {
+	// Check if there are any edges pointing to descendants of the vertex
+	for _, roundSet := range dag.internal {
+		for _, otherVertex := range roundSet.Entries() {
+			if dag.Path(&vertex, &otherVertex) || dag.StrongPath(&vertex, &otherVertex) {
+				return false
+			}
+		}
+	}
+	return true
+}
