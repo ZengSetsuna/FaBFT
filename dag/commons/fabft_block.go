@@ -1,9 +1,13 @@
 package commons
 
 type FabftBlock struct {
-	mkroot        string
-	sender        NodeInfo
-	round         Round
-	transaction   string
-	lastRoungTips []string
+	Mkroot        string
+	Sender        *NodeInfo
+	Round         Round
+	Transaction   string
+	LastRoungTips []string
+}
+
+func (c *FabftBlock) Hash() string {
+	return c.Mkroot
 }

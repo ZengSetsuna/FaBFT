@@ -9,6 +9,8 @@ type Vertex struct {
 	StrongEdges []BaseVertex
 	WeakEdges   []BaseVertex
 	Delivered   bool
+	BvHash		uint64
+	PrevHashes	[]uint64
 }
 
 type BaseVertex struct {
@@ -67,3 +69,5 @@ func (v Vertex) String() string {
 func (v BaseVertex) String() string {
 	return fmt.Sprintf("(s=%s,r=%d,b=%s)", v.Source, v.Round, v.Block)
 }
+
+func (v *Vertex)
