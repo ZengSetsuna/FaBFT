@@ -6,11 +6,11 @@ import (
 
 type Vertex struct {
 	BaseVertex
-	StrongEdges []BaseVertex
-	WeakEdges   []BaseVertex
-	Delivered   bool
-	BvHash		uint64
-	PrevHashes	[]uint64
+	StrongEdges []BaseVertex `hash:"ignore"`
+	WeakEdges   []BaseVertex `hash:"ignore"`
+	Delivered  bool `hash:"ignore"`
+	VertexHash VHash `hash:"ignore"`
+	PrevHashes []VHash
 }
 
 type BaseVertex struct {

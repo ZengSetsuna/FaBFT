@@ -25,22 +25,19 @@ type FabftNode struct {
 	peers    []*FabftNode
 	peersMap collections.Map[commons.Address, *FabftNode]
 	f        int
-	w        int
 	// persistent info
-	dag         internal.DAG
-	round       commons.Round
-	buffer      collections.Set[*commons.Vertex]
-	decidedWave commons.Wave
-	leaderStack collections.Stack[*commons.Vertex]
+	dag    internal.DAG
+	round  commons.Round
+	buffer collections.Map[commons.VHash, *commons.Vertex]
 	// non-persistent info
 	timer             *time.Timer
 	timerTimeout      time.Duration
 	networkAssumption commons.NetworkAssumption
 	// channels
-	RBcastChannel  chan internal.BroadcastMessage[*commons.Vertex, commons.Round]
 	VertexChannel  chan internal.BroadcastMessage[commons.Vertex, commons.Round]
 	VoteChannel    chan commons.Vote
 	BlockToPropose chan commons.Block
+	QCChannel      chan commons.QC
 	signatures     []collections.Set[string]
 	// log
 	log *log.Entry
@@ -60,17 +57,17 @@ func NewFabftNode(addr commons.Address, networkAssumption commons.NetworkAssumpt
 		f:                 0,
 		dag:               internal.NewDAG(),
 		round:             0,
-		buffer:            collections.NewHashSet(commons.VertexHash),
-		decidedWave:       0,
-		leaderStack:       collections.NewStack[*commons.Vertex](),
+		buffer:            collections.NewHashMap[commons.VHash, *commons.Vertex](),
 		timer:             time.NewTimer(0),
 		timerTimeout:      timerTimeout,
-		RBcastChannel:     make(chan internal.BroadcastMessage[*commons.Vertex, commons.Round], 65535),
 		VertexChannel:     make(chan internal.BroadcastMessage[commons.Vertex, commons.Round], 65535),
 		BlockToPropose:    make(chan commons.Block, 65535),
 		log:               logger,
 		networkAssumption: networkAssumption,
 		peersMap:          collections.NewHashMap[commons.Address, *FabftNode](),
+		QCChannel:         make(chan commons.QC, 128),
+		signatures:        make([]collections.Set[string], 0),
+		VoteChannel:       make(chan commons.Vote, 1024),
 	}
 	instance.peers = append(instance.peers, instance)
 	_ = instance.timer.Stop()
@@ -119,6 +116,8 @@ func (node *FabftNode) OnStop() {
 	close(node.RBcastChannel)
 	close(node.VertexChannel)
 	close(node.BlockToPropose)
+	close(node.QCChannel)
+	close(node.VoteChannel)
 	if !node.timer.Stop() {
 		select {
 		case <-node.timer.C:
@@ -191,7 +190,7 @@ func (node *FabftNode) TimeoutRoutine(ctx context.Context) {
 }
 
 func (node *FabftNode) handleTimeout() {
-	go node.checkLastRound()
+	go node.checkQC()
 	node.log.Debug("buffer", node.buffer.Entries(), "round", node.round, "node.dag.GetRound(node.round).Size()", node.dag.GetRound(node.round).Size())
 
 	/*for _, v := range node.buffer.Entries() {
@@ -229,29 +228,35 @@ func (node *FabftNode) generateVertex() *commons.Vertex {
 		Round:  node.round,
 		Block:  block,
 	}
-	hash, err := hashstructure.Hash(bv, nil)
 	if node.round == 0 {
-		return &commons.Vertex{
+		v := &commons.Vertex{
 			BaseVertex:  bv,
 			StrongEdges: make([]commons.BaseVertex, 0),
 			WeakEdges:   nil,
 			Delivered:   false,
-			PrevHashes:  make([]string, 0),
-			BvHash:      hash,
+			PrevHashes:  make([]commons.VHash, 0),
+			VertexHash:  0,
 		}
+		vh, err := hashstructure.Hash(v, nil)
+		v.VertexHash = commons.VHash(vh)
+		return v
+	}
 
-	}
 	roundSet := node.dag.GetRound(node.round - 1)
-	var hashPointers []string
+	var hashPointers []uint64
 	for _, tips := range roundSet.Entries() {
-		hashPointers = append(hashPointers, tips.Block.Hash())
+		hashPointers = append(hashPointers, tips.VertexHash)
 	}
-	return &commons.Vertex{
-		BaseVertex:  commons.BaseVertex{},
+	v := &commons.Vertex{
+		BaseVertex:  bv,
 		StrongEdges: nil,
 		WeakEdges:   nil,
 		Delivered:   false,
+		PrevHashes:  hashPointers,
 	}
+	vh, err := hashstructure.Hash(v, nil)
+	v.VertexHash = vh
+	return v
 }
 
 func (node *FabftNode) rBcast(v *commons.Vertex, r commons.Round) {
@@ -273,6 +278,7 @@ func (node *FabftNode) verifyVertexMsg(vm *internal.BroadcastMessage[commons.Ver
 		sig := node.signVertex(&vm.Message)
 		node.vote(true, sig, &vm.Message)
 	}
+	node.buffer.Put(vm.Message.VertexHash, &vm.Message, true)
 }
 
 func (node *FabftNode) verifyVertex(v *commons.Vertex) bool {
@@ -296,8 +302,16 @@ func (node *FabftNode) vertexBcast(v *commons.Vertex, r commons.Round) {
 	}
 }
 
-func (node *FabftNode) checkLastRound() {
+func (node *FabftNode) checkQC() {
+	for qc := range node.QCChannel {
+		v, err := node.buffer.Get(qc.VertexHash)
+		lastRoundVertices := node.dag.GetRound(v.Round - 1).VertexMap()
+		for ph := range v.PrevHashes {
+			if _, ok := lastRoundVertices[ph]; !ok {
 
+			}
+		}
+	}
 }
 
 func (node *FabftNode) vote(approved bool, signature string, v *commons.Vertex) {
@@ -306,7 +320,7 @@ func (node *FabftNode) vote(approved bool, signature string, v *commons.Vertex) 
 		Round:     v.Round,
 		Approved:  approved,
 		Signature: signature,
-		Hash:      v.BvHash,
+		Hash:      v.VertexHash,
 	}
 }
 

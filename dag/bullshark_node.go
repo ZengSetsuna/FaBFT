@@ -335,7 +335,7 @@ func (node *BullsharkNode) rBcast(v *commons.Vertex, r commons.Round) {
 		}
 	}
 }
-
+.,
 func (node *BullsharkNode) aBcast(b commons.Block, r uint64) {
 	node.BlockToPropose <- b
 }

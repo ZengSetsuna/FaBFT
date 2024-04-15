@@ -5,45 +5,42 @@ import (
 	"sort"
 
 	"github.com/tuannh982/dag-bft/dag/commons"
-	"github.com/tuannh982/dag-bft/utils/collections"
 )
 
-type DAG interface {
-	VertexExist(v *commons.BaseVertex) bool
-	AllEdgesExist(v *commons.Vertex) bool
-	Path(v, u *commons.Vertex) bool
-	StrongPath(v, u *commons.Vertex) bool
+type FabftDAG interface {
+	//VertexExist(v *commons.BaseVertex) bool
+	//AllEdgesExist(v *commons.Vertex) bool
 	NewRoundIfNotExists(r commons.Round)
 	GetRound(r commons.Round) VertexRoundSet
-	SetDelivered(v *commons.Vertex, delivered bool)
+	//SetDelivered(v *commons.Vertex, delivered bool)
 	String() string
 }
 
-type VertexRoundSet interface {
+type FabftVertexRoundSet interface {
 	Entries() []commons.Vertex
 	AddVertex(v commons.Vertex) bool
-	SourceExists(a commons.Address) bool
-	GetBySource(a commons.Address) commons.Vertex
-	SetDelivered(a commons.Address, delivered bool)
+	//SourceExists(a commons.Address) bool
+	//GetBySource(a commons.Address) commons.Vertex
+	//SetDelivered(a commons.Address, delivered bool)
 	Size() int
 	VertexMap() map[commons.Address]commons.Vertex
 }
 
-type vertexRoundSet struct {
-	internal map[commons.Address]commons.Vertex
+type fabftVertexRoundSet struct {
+	internal map[commons.VHash]commons.Vertex
 }
 
-type dag struct {
-	internal map[commons.Round]VertexRoundSet
+type fabftdag struct {
+	internal map[commons.Round]FabftVertexRoundSet
 }
 
-func NewDAG() DAG {
-	return &dag{
+func NewFabftDAG() FabftDAG {
+	return &fabftdag{
 		internal: make(map[commons.Round]VertexRoundSet),
 	}
 }
 
-func (dag *dag) VertexExist(v *commons.BaseVertex) bool {
+/*func (dag *fabftdag) VertexExist(v *commons.BaseVertex) bool {
 	if v == nil {
 		return false
 	}
@@ -51,9 +48,9 @@ func (dag *dag) VertexExist(v *commons.BaseVertex) bool {
 		return roundSet.SourceExists(v.Source)
 	}
 	return false
-}
+}*/
 
-func (dag *dag) AllEdgesExist(v *commons.Vertex) bool {
+/*func (dag *fabftdag) AllEdgesExist(v *commons.Vertex) bool {
 	for _, u := range v.StrongEdges {
 		if !dag.VertexExist(&u) {
 			return false
@@ -65,9 +62,9 @@ func (dag *dag) AllEdgesExist(v *commons.Vertex) bool {
 		}
 	}
 	return true
-}
+}*/
 
-func (dag *dag) Path(v, u *commons.Vertex) bool {
+/*func (dag *fabftdag) Path(v, u *commons.Vertex) bool {
 	if v == nil || u == nil {
 		return false
 	}
@@ -145,27 +142,28 @@ func (dag *dag) StrongPath(v, u *commons.Vertex) bool {
 		}
 	}
 	return false
-}
+}*/
 
-func (dag *dag) NewRoundIfNotExists(r commons.Round) {
+func (dag *fabftdag) NewRoundIfNotExists(r commons.Round) {
 	if _, ok := dag.internal[r]; !ok {
-		dag.internal[r] = &vertexRoundSet{
-			internal: make(map[commons.Address]commons.Vertex),
+		dag.internal[r] = &fabftVertexRoundSet{
+			internal: make(map[commons.VHash]commons.Vertex),
 		}
 	}
 }
 
-func (dag *dag) GetRound(r commons.Round) VertexRoundSet {
+func (dag *fabftdag) GetRound(r commons.Round) FabftVertexRoundSet {
 	return dag.internal[r]
 }
 
-func (dag *dag) SetDelivered(v *commons.Vertex, delivered bool) {
-	if dag.VertexExist(&v.BaseVertex) {
-		dag.GetRound(v.Round).SetDelivered(v.Source, delivered)
+/*
+	func (dag *dag) SetDelivered(v *commons.Vertex, delivered bool) {
+		if dag.VertexExist(&v.BaseVertex) {
+			dag.GetRound(v.Round).SetDelivered(v.Source, delivered)
+		}
 	}
-}
-
-func (dag *dag) String() string {
+*/
+func (dag *fabftdag) String() string {
 	m := make(map[commons.Round][]string)
 	roundSet := make([]commons.Round, 0, len(dag.internal))
 	for round, vertices := range dag.internal {
@@ -186,7 +184,7 @@ func (dag *dag) String() string {
 	return ret
 }
 
-func (s *vertexRoundSet) Entries() []commons.Vertex {
+func (s *fabftVertexRoundSet) Entries() []commons.Vertex {
 	arr := make([]commons.Vertex, 0, len(s.internal))
 	for _, v := range s.internal {
 		arr = append(arr, v)
@@ -194,39 +192,38 @@ func (s *vertexRoundSet) Entries() []commons.Vertex {
 	return arr
 }
 
-func (s *vertexRoundSet) AddVertex(v commons.Vertex) bool {
-	if s.SourceExists(v.Source) {
-		return false
-	}
-	s.internal[v.Source] = v
+func (s *fabftVertexRoundSet) AddVertex(v commons.Vertex) bool {
+	s.internal[v.VertexHash] = v
 	return true
 }
 
-func (s *vertexRoundSet) SourceExists(a commons.Address) bool {
-	if _, found := s.internal[a]; found {
-		return true
+/*
+	func (s *vertexRoundSet) SourceExists(a commons.Address) bool {
+		if _, found := s.internal[a]; found {
+			return true
+		}
+		return false
 	}
-	return false
+*/
+func (s *fabftVertexRoundSet) GetByHash(vh commons.VHash) commons.Vertex {
+	return s.internal[vh]
 }
 
-func (s *vertexRoundSet) GetBySource(a commons.Address) commons.Vertex {
-	return s.internal[a]
-}
-
-func (s *vertexRoundSet) SetDelivered(a commons.Address, delivered bool) {
-	if s.SourceExists(a) {
-		v := s.internal[a]
-		v.Delivered = delivered
-		s.internal[a] = v
+/*
+	func (s *vertexRoundSet) SetDelivered(a commons.Address, delivered bool) {
+		if s.SourceExists(a) {
+			v := s.internal[a]
+			v.Delivered = delivered
+			s.internal[a] = v
+		}
 	}
-}
-
-func (s *vertexRoundSet) Size() int {
+*/
+func (s *fabftVertexRoundSet) Size() int {
 	return len(s.internal)
 }
 
 // FindTips returns the tips of the DAG.
-func (dag *dag) FindTips() []commons.Vertex {
+func (dag *fabftdag) FindTips() []commons.Vertex {
 	tips := make([]commons.Vertex, 0)
 
 	// Iterate through all vertices in the DAG
@@ -243,7 +240,7 @@ func (dag *dag) FindTips() []commons.Vertex {
 }
 
 // isTip checks if the vertex is a tip (has no descendants).
-func (dag *dag) isTip(round commons.Round, vertex commons.Vertex) bool {
+func (dag *fabftdag) isTip(round commons.Round, vertex commons.Vertex) bool {
 	// Check if there are any edges pointing to descendants of the vertex
 	for _, roundSet := range dag.internal {
 		for _, otherVertex := range roundSet.Entries() {
@@ -255,6 +252,6 @@ func (dag *dag) isTip(round commons.Round, vertex commons.Vertex) bool {
 	return true
 }
 
-func (s *vertexRoundSet) VertexMap() map[commons.Address]commons.Vertex {
+func (s *fabftVertexRoundSet) VertexMap() map[commons.VHash]commons.Vertex {
 	return s.internal
 }
