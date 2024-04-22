@@ -11,7 +11,7 @@ type FabftDAG interface {
 	//VertexExist(v *commons.BaseVertex) bool
 	//AllEdgesExist(v *commons.Vertex) bool
 	NewRoundIfNotExists(r commons.Round)
-	GetRound(r commons.Round) VertexRoundSet
+	GetRound(r commons.Round) FabftVertexRoundSet
 	//SetDelivered(v *commons.Vertex, delivered bool)
 	String() string
 }
@@ -23,7 +23,7 @@ type FabftVertexRoundSet interface {
 	//GetBySource(a commons.Address) commons.Vertex
 	//SetDelivered(a commons.Address, delivered bool)
 	Size() int
-	VertexMap() map[commons.Address]commons.Vertex
+	VertexMap() map[commons.VHash]commons.Vertex
 }
 
 type fabftVertexRoundSet struct {
@@ -36,7 +36,7 @@ type fabftdag struct {
 
 func NewFabftDAG() FabftDAG {
 	return &fabftdag{
-		internal: make(map[commons.Round]VertexRoundSet),
+		internal: make(map[commons.Round]FabftVertexRoundSet),
 	}
 }
 
@@ -220,36 +220,6 @@ func (s *fabftVertexRoundSet) GetByHash(vh commons.VHash) commons.Vertex {
 */
 func (s *fabftVertexRoundSet) Size() int {
 	return len(s.internal)
-}
-
-// FindTips returns the tips of the DAG.
-func (dag *fabftdag) FindTips() []commons.Vertex {
-	tips := make([]commons.Vertex, 0)
-
-	// Iterate through all vertices in the DAG
-	for round, roundSet := range dag.internal {
-		for _, vertex := range roundSet.Entries() {
-			// Check if the vertex has no descendants
-			if dag.isTip(round, vertex) {
-				tips = append(tips, vertex)
-			}
-		}
-	}
-
-	return tips
-}
-
-// isTip checks if the vertex is a tip (has no descendants).
-func (dag *fabftdag) isTip(round commons.Round, vertex commons.Vertex) bool {
-	// Check if there are any edges pointing to descendants of the vertex
-	for _, roundSet := range dag.internal {
-		for _, otherVertex := range roundSet.Entries() {
-			if dag.Path(&vertex, &otherVertex) || dag.StrongPath(&vertex, &otherVertex) {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func (s *fabftVertexRoundSet) VertexMap() map[commons.VHash]commons.Vertex {

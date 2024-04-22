@@ -26,9 +26,11 @@ type FabftNode struct {
 	peersMap collections.Map[commons.Address, *FabftNode]
 	f        int
 	// persistent info
-	dag    internal.DAG
-	round  commons.Round
-	buffer collections.Map[commons.VHash, *commons.Vertex]
+	dag               internal.FabftDAG
+	round             commons.Round
+	buffer            collections.Map[commons.VHash, *commons.Vertex]                // storing received blocks with no qc
+	bufferWaitingPrev collections.Map[commons.VHash, *commons.Vertex]                // buffer2, storing blocks with QC but missing prev blocks
+	missingPrev       collections.Map[commons.VHash, collections.Set[commons.VHash]] // map hash of vertices in buffer2 to their missing prev blocks
 	// non-persistent info
 	timer             *time.Timer
 	timerTimeout      time.Duration
@@ -55,9 +57,11 @@ func NewFabftNode(addr commons.Address, networkAssumption commons.NetworkAssumpt
 		},
 		peers:             make([]*FabftNode, 0),
 		f:                 0,
-		dag:               internal.NewDAG(),
+		dag:               internal.NewFabftDAG(),
 		round:             0,
 		buffer:            collections.NewHashMap[commons.VHash, *commons.Vertex](),
+		bufferWaitingPrev: collections.NewHashMap[commons.VHash, *commons.Vertex](),
+		missingPrev:       collections.NewHashMap[commons.VHash, collections.Set[commons.VHash]](),
 		timer:             time.NewTimer(0),
 		timerTimeout:      timerTimeout,
 		VertexChannel:     make(chan internal.BroadcastMessage[commons.Vertex, commons.Round], 65535),
@@ -155,14 +159,16 @@ func (node *FabftNode) StartRoutine(ctx context.Context) {
 func (node *FabftNode) ReceiveRoutine(ctx context.Context) {
 	for {
 		select {
-		case rMsg := <-node.RBcastChannel:
-			node.log.Debug("receive message from RBcastChannel", "p=", rMsg.P, "r=", rMsg.R, "m=", rMsg.Message)
-			node.rDeliver(rMsg.Message, rMsg.R, rMsg.P)
+		/*
+			case rMsg := <-node.RBcastChannel:
+				node.log.Debug("receive message from RBcastChannel", "p=", rMsg.P, "r=", rMsg.R, "m=", rMsg.Message)
+				node.rDeliver(rMsg.Message, rMsg.R, rMsg.P)
+		*/
 		case vertexMsg := <-node.VertexChannel:
 			node.log.Debug("receive message from VertexChannel", "p=", vertexMsg.P, "r=", vertexMsg.R, "m=", vertexMsg.Message)
 			go node.verifyVertexMsg(&vertexMsg)
 		case vMsg := <-node.VoteChannel:
-			node.log.Debug("receive message from VoteChannel", "p=", vMsg.P, "r=", vMsg.R, "m=", vMsg.Message)
+			node.log.Debug("receive message from VoteChannel", "approved=", vMsg.Approved, "signature=", vMsg.Signature, "hash=", vMsg.Hash, "round=", vMsg.Hash)
 		case <-ctx.Done():
 			return
 		default:
@@ -306,9 +312,10 @@ func (node *FabftNode) checkQC() {
 	for qc := range node.QCChannel {
 		v, err := node.buffer.Get(qc.VertexHash)
 		lastRoundVertices := node.dag.GetRound(v.Round - 1).VertexMap()
-		for ph := range v.PrevHashes {
+		for _, ph := range v.PrevHashes {
 			if _, ok := lastRoundVertices[ph]; !ok {
 
+				node.missingPrev.Put(ph)
 			}
 		}
 	}

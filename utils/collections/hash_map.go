@@ -1,3 +1,4 @@
+/*
 package collections
 
 type hashMap[K comparable, V any] struct {
@@ -62,4 +63,76 @@ func (m *hashMap[K, V]) Values() []V {
 		arr = append(arr, v)
 	}
 	return arr
+}
+*/
+
+package collections
+
+import "sync"
+
+type syncMap[K comparable, V any] struct {
+	entries sync.Map
+}
+
+func NewHashMap[K comparable, V any]() Map[K, V] {
+	return &syncMap[K, V]{
+		entries: sync.Map{},
+	}
+}
+
+func (m *syncMap[K, V]) Contains(k K) bool {
+	_, ok := m.entries.Load(k)
+	return ok
+}
+
+func (m *syncMap[K, V]) Put(k K, v V, forced bool) error {
+	if forced {
+		m.entries.Store(k, v)
+		return nil
+	}
+	if m.Contains(k) {
+		return ErrValueExisted
+	}
+	m.entries.Store(k, v)
+	return nil
+}
+
+func (m *syncMap[K, V]) Get(k K) (v V, err error) {
+	val, ok := m.entries.Load(k)
+	if !ok {
+		return v, ErrValueNotExisted
+	}
+	return val.(V), nil
+}
+
+func (m *syncMap[K, V]) Delete(k K) error {
+	m.entries.Delete(k)
+	return nil
+}
+
+func (m *syncMap[K, V]) Size() int {
+	size := 0
+	m.entries.Range(func(_, _ interface{}) bool {
+		size++
+		return true
+	})
+	return size
+}
+
+func (m *syncMap[K, V]) Keys() []K {
+	keys := make([]K, 0, m.Size())
+	m.entries.Range(func(key, _ interface{}) bool {
+		keys = append(keys, key.(K))
+		return true
+	})
+	return keys
+}
+
+func (m *syncMap[K, V]) Values() []V {
+	values := make([]V, 0, m.Size())
+	m.entries.Range(func(_, value interface{}) bool {
+		values = append(values, value.(V))
+		return true
+	})
+	return values
 }
