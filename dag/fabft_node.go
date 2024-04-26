@@ -26,11 +26,12 @@ type FabftNode struct {
 	peersMap collections.Map[commons.Address, *FabftNode]
 	f        int
 	// persistent info
-	dag               internal.FabftDAG
-	round             commons.Round
-	buffer            collections.Map[commons.VHash, *commons.Vertex]                // storing received blocks with no qc
-	bufferWaitingPrev collections.Map[commons.VHash, *commons.Vertex]                // buffer2, storing blocks with QC but missing prev blocks
-	missingPrev       collections.Map[commons.VHash, collections.Set[commons.VHash]] // map hash of vertices in buffer2 to their missing prev blocks
+	dag                    internal.FabftDAG
+	round                  commons.Round
+	buffer                 collections.Map[commons.VHash, *commons.Vertex]    // storing received blocks with no qc
+	bufferWaitingAncestors collections.Map[commons.VHash, *commons.Vertex]    // buffer2, storing blocks with QC but missing prev blocks
+	descendantsWaiting     collections.Map[commons.VHash, chan commons.VHash] // map hash of missing vertices to vertices that needs this vertex
+	missingAncestorsCount  collections.IncrementableMap[commons.VHash]        // map vertices to the num of ancestors missing. add vertex to dag if this count hits 0
 	// non-persistent info
 	timer             *time.Timer
 	timerTimeout      time.Duration
@@ -55,23 +56,24 @@ func NewFabftNode(addr commons.Address, networkAssumption commons.NetworkAssumpt
 		NodeInfo: &commons.NodeInfo{
 			Address: addr,
 		},
-		peers:             make([]*FabftNode, 0),
-		f:                 0,
-		dag:               internal.NewFabftDAG(),
-		round:             0,
-		buffer:            collections.NewHashMap[commons.VHash, *commons.Vertex](),
-		bufferWaitingPrev: collections.NewHashMap[commons.VHash, *commons.Vertex](),
-		missingPrev:       collections.NewHashMap[commons.VHash, collections.Set[commons.VHash]](),
-		timer:             time.NewTimer(0),
-		timerTimeout:      timerTimeout,
-		VertexChannel:     make(chan internal.BroadcastMessage[commons.Vertex, commons.Round], 65535),
-		BlockToPropose:    make(chan commons.Block, 65535),
-		log:               logger,
-		networkAssumption: networkAssumption,
-		peersMap:          collections.NewHashMap[commons.Address, *FabftNode](),
-		QCChannel:         make(chan commons.QC, 128),
-		signatures:        make([]collections.Set[string], 0),
-		VoteChannel:       make(chan commons.Vote, 1024),
+		peers:                  make([]*FabftNode, 0),
+		f:                      0,
+		dag:                    internal.NewFabftDAG(),
+		round:                  0,
+		buffer:                 collections.NewHashMap[commons.VHash, *commons.Vertex](),
+		bufferWaitingAncestors: collections.NewHashMap[commons.VHash, *commons.Vertex](),
+		descendantsWaiting:     collections.NewHashMap[commons.VHash, chan commons.VHash](),
+		missingAncestorsCount:  collections.NewIncrementableMap[commons.VHash](),
+		timer:                  time.NewTimer(0),
+		timerTimeout:           timerTimeout,
+		VertexChannel:          make(chan internal.BroadcastMessage[commons.Vertex, commons.Round], 65535),
+		BlockToPropose:         make(chan commons.Block, 65535),
+		log:                    logger,
+		networkAssumption:      networkAssumption,
+		peersMap:               collections.NewHashMap[commons.Address, *FabftNode](),
+		QCChannel:              make(chan commons.QC, 1024),
+		signatures:             make([]collections.Set[string], 0),
+		VoteChannel:            make(chan commons.Vote, 1024),
 	}
 	instance.peers = append(instance.peers, instance)
 	_ = instance.timer.Stop()
@@ -83,7 +85,7 @@ func (node *FabftNode) SetPeers(peers []*FabftNode) {
 	node.peers = peers
 	node.f = len(node.peers) / 3
 	for _, p := range peers {
-		err := node.peersMap.Put(p.NodeInfo.Address, p, true)
+		_ = node.peersMap.Put(p.NodeInfo.Address, p, true)
 	}
 }
 
@@ -117,7 +119,6 @@ func (node *FabftNode) Init() error {
 }
 
 func (node *FabftNode) OnStop() {
-	close(node.RBcastChannel)
 	close(node.VertexChannel)
 	close(node.BlockToPropose)
 	close(node.QCChannel)
@@ -154,6 +155,7 @@ func (node *FabftNode) StartRoutine(ctx context.Context) {
 	go node.ReceiveRoutine(ctx)
 	node.timer.Reset(node.timerTimeout)
 	go node.TimeoutRoutine(ctx)
+	go node.checkQC()
 }
 
 func (node *FabftNode) ReceiveRoutine(ctx context.Context) {
@@ -196,9 +198,7 @@ func (node *FabftNode) TimeoutRoutine(ctx context.Context) {
 }
 
 func (node *FabftNode) handleTimeout() {
-	go node.checkQC()
-	node.log.Debug("buffer", node.buffer.Entries(), "round", node.round, "node.dag.GetRound(node.round).Size()", node.dag.GetRound(node.round).Size())
-
+	node.log.Debug("buffer size:", node.buffer.Size(), "round", node.round, "node.dag.GetRound(node.round).Size()", node.dag.GetRound(node.round).Size()
 	/*for _, v := range node.buffer.Entries() {
 		if v.Round <= node.round && node.dag.AllEdgesExist(v) {
 			node.dag.NewRoundIfNotExists(v.Round)
@@ -207,9 +207,13 @@ func (node *FabftNode) handleTimeout() {
 			node.log.Debug("vertex added to DAG", v)
 		}
 	}*/
-
+	qc := node.checkLastRound(node.round)
+	if qc != nil {
+		go node.broadcastQC(qc)
+	}
 	b := node.generateVertex()
 	node.vertexBcast(b, node.round) // broadcast block to all peers
+	_ = node.buffer.Put(b.VertexHash, b, true)
 
 	/*if node.dag.GetRound(node.round).Size() >= 2*node.f+1 {
 		if int64(node.round)%int64(node.w) == 0 {
@@ -243,13 +247,13 @@ func (node *FabftNode) generateVertex() *commons.Vertex {
 			PrevHashes:  make([]commons.VHash, 0),
 			VertexHash:  0,
 		}
-		vh, err := hashstructure.Hash(v, nil)
+		vh, _ := hashstructure.Hash(v, nil)
 		v.VertexHash = commons.VHash(vh)
 		return v
 	}
 
 	roundSet := node.dag.GetRound(node.round - 1)
-	var hashPointers []uint64
+	var hashPointers []commons.VHash
 	for _, tips := range roundSet.Entries() {
 		hashPointers = append(hashPointers, tips.VertexHash)
 	}
@@ -260,11 +264,12 @@ func (node *FabftNode) generateVertex() *commons.Vertex {
 		Delivered:   false,
 		PrevHashes:  hashPointers,
 	}
-	vh, err := hashstructure.Hash(v, nil)
-	v.VertexHash = vh
+	vh, _ := hashstructure.Hash(v, nil)
+	v.VertexHash = commons.VHash(vh)
 	return v
 }
 
+/*
 func (node *FabftNode) rBcast(v *commons.Vertex, r commons.Round) {
 	for _, peer := range node.peers {
 		clonedPeer := peer
@@ -279,12 +284,14 @@ func (node *FabftNode) rBcast(v *commons.Vertex, r commons.Round) {
 	}
 }
 
+*/
+
 func (node *FabftNode) verifyVertexMsg(vm *internal.BroadcastMessage[commons.Vertex, commons.Round]) {
 	if node.verifyVertex(&vm.Message) {
 		sig := node.signVertex(&vm.Message)
 		node.vote(true, sig, &vm.Message)
 	}
-	node.buffer.Put(vm.Message.VertexHash, &vm.Message, true)
+	_ = node.buffer.Put(vm.Message.VertexHash, &vm.Message, true)
 }
 
 func (node *FabftNode) verifyVertex(v *commons.Vertex) bool {
@@ -308,21 +315,56 @@ func (node *FabftNode) vertexBcast(v *commons.Vertex, r commons.Round) {
 	}
 }
 
-func (node *FabftNode) checkQC() {
-	for qc := range node.QCChannel {
-		v, err := node.buffer.Get(qc.VertexHash)
-		lastRoundVertices := node.dag.GetRound(v.Round - 1).VertexMap()
-		for _, ph := range v.PrevHashes {
-			if _, ok := lastRoundVertices[ph]; !ok {
+func (node *FabftNode) receiveQC() {
+	for {
+		qc := <-node.QCChannel
+		go node.checkQC(qc)
+	}
+}
 
-				node.missingPrev.Put(ph)
-			}
+func (node *FabftNode) checkQC(qc commons.QC) {
+	if !node.verifyQCSignatures(qc) {
+		return
+	}
+	v, _ := node.buffer.Get(qc.VertexHash)
+	lastRoundVertices := node.dag.GetRound(v.Round - 1).VertexMap()
+	missing := false
+	for _, ph := range v.PrevHashes {
+		if _, ok := lastRoundVertices[ph]; !ok {
+			_ = node.descendantsWaiting.Put(ph, make(chan commons.VHash), false) // initialize channel for the first time
+			descendants, _ := node.descendantsWaiting.Get(ph)
+			descendants <- v.VertexHash
+			_ = node.missingAncestorsCount.Put(v.VertexHash, 0, false)
+			node.missingAncestorsCount.IncrementValueInt64(v.VertexHash, 1) // increment count of the missing ancestor
+			missing = true
 		}
+	}
+	if !missing { // no prev vertices missing
+		node.checkDescendantsReady(v)
+	}
+}
+
+func (node *FabftNode) checkDescendantsReady(v *commons.Vertex) {
+	node.dag.GetRound(v.Round).AddVertex(*v)
+	_ = node.buffer.Delete(v.VertexHash)
+	node.log.Println("vertex added to DAG:", v.VertexHash)
+	descendants, _ := node.descendantsWaiting.Get(v.VertexHash)
+	descendantsReadyToAdd := make(chan *commons.Vertex, 1024)
+	defer close(descendantsReadyToAdd)
+	for d := range descendants {
+		if node.missingAncestorsCount.IncrementValueInt64(d, -1) == 0 {
+			_ = node.missingAncestorsCount.Delete(d)
+			descendantsVertex, _ := node.buffer.Get(d)
+			descendantsReadyToAdd <- descendantsVertex
+		}
+	}
+	for descendantReady := range descendantsReadyToAdd {
+		go node.checkDescendantsReady(descendantReady)
 	}
 }
 
 func (node *FabftNode) vote(approved bool, signature string, v *commons.Vertex) {
-	vSource, err := node.peersMap.Get(v.Source)
+	vSource, _ := node.peersMap.Get(v.Source)
 	vSource.VoteChannel <- commons.Vote{
 		Round:     v.Round,
 		Approved:  approved,
@@ -334,4 +376,36 @@ func (node *FabftNode) vote(approved bool, signature string, v *commons.Vertex) 
 func (node *FabftNode) signVertex(v *commons.Vertex) string {
 	// placeholder
 	return "signature"
+}
+
+func (node *FabftNode) checkLastRound(lastRound commons.Round) *commons.QC {
+	qc := &commons.QC{
+		Signatures: make([]string, 0),
+		VertexHash: 0,
+		Round:      lastRound,
+		Sender:     node.NodeInfo.Address,
+	}
+	for vote := range node.VoteChannel{
+		if node.verifyVote(vote, lastRound) {
+			qc.Signatures = append(qc.Signatures, vote.Signature)
+			qc.VertexHash = vote.Hash
+		}
+	}
+	if len(qc.Signatures) > len(node.peers) - node.f {
+		return qc
+	}
+	node.log.Println("timeout: not enough signatures for vertex on round:", lastRound)
+	return nil
+}
+
+func (node *FabftNode) verifyQCSignatures(qc commons.QC) bool {
+	return true // placeholder
+}
+
+func (node *FabftNode) verifyVote(vote commons.Vote, round commons.Round) bool {
+	return vote.Round == round // placeholder
+}
+
+func (node *FabftNode) broadcastQC (qc commons.QC) {
+
 }

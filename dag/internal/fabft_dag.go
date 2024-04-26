@@ -2,9 +2,9 @@ package internal
 
 import (
 	"fmt"
-	"sort"
-
 	"github.com/tuannh982/dag-bft/dag/commons"
+	"sort"
+	"sync"
 )
 
 type FabftDAG interface {
@@ -28,6 +28,7 @@ type FabftVertexRoundSet interface {
 
 type fabftVertexRoundSet struct {
 	internal map[commons.VHash]commons.Vertex
+	mutex    sync.Mutex // thread safe
 }
 
 type fabftdag struct {
@@ -185,6 +186,8 @@ func (dag *fabftdag) String() string {
 }
 
 func (s *fabftVertexRoundSet) Entries() []commons.Vertex {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	arr := make([]commons.Vertex, 0, len(s.internal))
 	for _, v := range s.internal {
 		arr = append(arr, v)
@@ -193,6 +196,8 @@ func (s *fabftVertexRoundSet) Entries() []commons.Vertex {
 }
 
 func (s *fabftVertexRoundSet) AddVertex(v commons.Vertex) bool {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	s.internal[v.VertexHash] = v
 	return true
 }
