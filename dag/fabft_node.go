@@ -25,6 +25,7 @@ type FabftNode struct {
 	peers    []*FabftNode
 	peersMap collections.Map[commons.Address, *FabftNode]
 	f        int
+	n        int
 	// persistent info
 	dag                    internal.FabftDAG
 	round                  commons.Round
@@ -60,6 +61,7 @@ func NewFabftNode(addr commons.Address, networkAssumption commons.NetworkAssumpt
 		f:                      0,
 		dag:                    internal.NewFabftDAG(),
 		round:                  0,
+		n:                      0,
 		buffer:                 collections.NewHashMap[commons.VHash, *commons.Vertex](),
 		bufferWaitingAncestors: collections.NewHashMap[commons.VHash, *commons.Vertex](),
 		descendantsWaiting:     collections.NewHashMap[commons.VHash, chan commons.VHash](),
@@ -83,7 +85,8 @@ func NewFabftNode(addr commons.Address, networkAssumption commons.NetworkAssumpt
 
 func (node *FabftNode) SetPeers(peers []*FabftNode) {
 	node.peers = peers
-	node.f = len(node.peers) / 3
+	node.n = len(node.peers)
+	node.f = node.n) / 3
 	for _, p := range peers {
 		_ = node.peersMap.Put(p.NodeInfo.Address, p, true)
 	}
@@ -153,9 +156,13 @@ func (node *FabftNode) ReportRoutine(ctx context.Context, interval time.Duration
 func (node *FabftNode) StartRoutine(ctx context.Context) {
 	go node.ReportRoutine(ctx, 10*time.Second)
 	go node.ReceiveRoutine(ctx)
-	node.timer.Reset(node.timerTimeout)
-	go node.TimeoutRoutine(ctx)
-	go node.checkQC()
+	if node.networkAssumption == commons.PartiallySynchronous {
+		node.timer.Reset(node.timerTimeout)
+		go node.TimeoutRoutine(ctx)
+	} else {
+		go node.AsynchronousRoutine(ctx)
+	}
+	go node.receiveQC()
 }
 
 func (node *FabftNode) ReceiveRoutine(ctx context.Context) {
@@ -169,8 +176,9 @@ func (node *FabftNode) ReceiveRoutine(ctx context.Context) {
 		case vertexMsg := <-node.VertexChannel:
 			node.log.Debug("receive message from VertexChannel", "p=", vertexMsg.P, "r=", vertexMsg.R, "m=", vertexMsg.Message)
 			go node.verifyVertexMsg(&vertexMsg)
-		case vMsg := <-node.VoteChannel:
-			node.log.Debug("receive message from VoteChannel", "approved=", vMsg.Approved, "signature=", vMsg.Signature, "hash=", vMsg.Hash, "round=", vMsg.Hash)
+		/*case vMsg := <-node.VoteChannel:
+		node.log.Debug("receive message from VoteChannel", "approved=", vMsg.Approved, "signature=", vMsg.Signature, "hash=", vMsg.Hash, "round=", vMsg.Hash)
+		go node.receiveVote */
 		case <-ctx.Done():
 			return
 		default:
@@ -181,24 +189,48 @@ func (node *FabftNode) ReceiveRoutine(ctx context.Context) {
 
 func (node *FabftNode) TimeoutRoutine(ctx context.Context) {
 	for {
-		if node.networkAssumption == commons.PartiallySynchronous {
-			select {
-			case <-node.timer.C:
-				node.log.Debug("timer timeout")
-				node.handleTimeout()
-			case <-ctx.Done():
-				return
-			default:
-				continue
-			}
-		} else {
+		select {
+		case <-node.timer.C:
+			node.log.Debug("timer timeout")
+			node.handleTimeout()
+		case <-ctx.Done():
+			return
+		default:
+			continue
+		}
+	}
+}
 
+func (node *FabftNode) AsynchronousRoutine(ctx context.Context) {
+	votesCount := 0
+	qc := commons.QC{
+		Signatures: make([]string, 0),
+		VertexHash: 0,
+		Round:      0,
+		Sender:     node.NodeInfo.Address,
+	}
+	node.asyncNewRound()
+	for {
+		select {
+		case vote := <-node.VoteChannel:
+			if node.verifyVote(vote, node.round) {
+				qc.Signatures = append(qc.Signatures, vote.Signature)
+				qc.VertexHash = vote.Hash
+				votesCount++
+			}
+			if votesCount > len(node.peers)-node.f {
+				node.broadcastQC(qc)
+			}
+		case <-ctx.Done():
+			return
+		default:
+			continue
 		}
 	}
 }
 
 func (node *FabftNode) handleTimeout() {
-	node.log.Debug("buffer size:", node.buffer.Size(), "round", node.round, "node.dag.GetRound(node.round).Size()", node.dag.GetRound(node.round).Size()
+	node.log.Debug("buffer size:", node.buffer.Size(), "round", node.round, "node.dag.GetRound(node.round).Size()", node.dag.GetRound(node.round).Size())
 	/*for _, v := range node.buffer.Entries() {
 		if v.Round <= node.round && node.dag.AllEdgesExist(v) {
 			node.dag.NewRoundIfNotExists(v.Round)
@@ -209,7 +241,7 @@ func (node *FabftNode) handleTimeout() {
 	}*/
 	qc := node.checkLastRound(node.round)
 	if qc != nil {
-		go node.broadcastQC(qc)
+		go node.broadcastQC(*qc)
 	}
 	b := node.generateVertex()
 	node.vertexBcast(b, node.round) // broadcast block to all peers
@@ -385,13 +417,13 @@ func (node *FabftNode) checkLastRound(lastRound commons.Round) *commons.QC {
 		Round:      lastRound,
 		Sender:     node.NodeInfo.Address,
 	}
-	for vote := range node.VoteChannel{
+	for vote := range node.VoteChannel {
 		if node.verifyVote(vote, lastRound) {
 			qc.Signatures = append(qc.Signatures, vote.Signature)
 			qc.VertexHash = vote.Hash
 		}
 	}
-	if len(qc.Signatures) > len(node.peers) - node.f {
+	if len(qc.Signatures) > node.n-node.f {
 		return qc
 	}
 	node.log.Println("timeout: not enough signatures for vertex on round:", lastRound)
@@ -406,6 +438,8 @@ func (node *FabftNode) verifyVote(vote commons.Vote, round commons.Round) bool {
 	return vote.Round == round // placeholder
 }
 
-func (node *FabftNode) broadcastQC (qc commons.QC) {
-
+func (node *FabftNode) broadcastQC(qc commons.QC) {
+	for _, peer := range node.peers {
+		peer.QCChannel <- qc
+	}
 }
