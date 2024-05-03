@@ -24,30 +24,30 @@ func (m *IncrementableMap[K]) Contains(k K) bool {
 	return ok
 }
 
-func (m *IncrementableMap[K]) Put(k K, v V, forced bool) error {
+func (m *IncrementableMap[K]) Put(k K, v int64, forced bool) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-
+	copiedV := v
 	if forced {
-		m.entries[k] = v
+		m.entries[k] = &copiedV
 		return nil
 	}
 	if m.Contains(k) {
 		return ErrValueExisted
 	}
-	m.entries[k] = v
+	m.entries[k] = &copiedV
 	return nil
 }
 
-func (m *IncrementableMap[K]) Get(k K) (v V, err error) {
+func (m *IncrementableMap[K]) Get(k K) (v int64, err error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	v, ok := m.entries[k]
+	value, ok := m.entries[k]
 	if !ok {
-		return v, ErrValueNotExisted
+		return *value, ErrValueNotExisted
 	}
-	return v, nil
+	return *value, nil
 }
 
 func (m *IncrementableMap[K]) Delete(k K) error {

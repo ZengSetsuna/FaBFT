@@ -13,6 +13,17 @@ import (
 )
 
 func main() {
+	testFabftPSync()
+}
+
+func hookShutdownSignal(done chan struct{}) {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	<-c
+	close(done)
+}
+
+func testRider() {
 	ss := make([]*dag.RiderNode, 0)
 	ctxs := make([]context.Context, 0)
 	n := 3
@@ -47,9 +58,22 @@ func main() {
 	<-done
 }
 
-func hookShutdownSignal(done chan struct{}) {
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
-	close(done)
+func testFabftPSync() {
+	ss := make([]*dag.FabftNode, 0)
+	ctxs := make([]context.Context, 0)
+	n := 3
+	for i := 0; i < n; i++ {
+		ss = append(ss, dag.NewFabftNode(commons.Address(strconv.Itoa(i)), commons.PartiallySynchronous, 600*time.Millisecond))
+		ctxs = append(ctxs, context.Background())
+	}
+	for i := 0; i < n; i++ {
+		ss[i].SetPeers(ss)
+	}
+	for i := 0; i < n; i++ {
+		_ = ss[i].Start(ctxs[i])
+	}
+	time.Sleep(1 * time.Second)
+	done := make(chan struct{})
+	go hookShutdownSignal(done)
+	<-done
 }

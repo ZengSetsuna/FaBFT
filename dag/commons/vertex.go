@@ -8,9 +8,9 @@ type Vertex struct {
 	BaseVertex
 	StrongEdges []BaseVertex `hash:"ignore"`
 	WeakEdges   []BaseVertex `hash:"ignore"`
-	Delivered  bool `hash:"ignore"`
-	VertexHash VHash `hash:"ignore"`
-	PrevHashes []VHash
+	Delivered   bool         `hash:"ignore"`
+	VertexHash  VHash        `hash:"ignore"`
+	PrevHashes  []VHash
 }
 
 type BaseVertex struct {
@@ -63,11 +63,9 @@ func (v Vertex) String() string {
 	for _, u := range v.WeakEdgesValues() {
 		weak = append(weak, fmt.Sprintf("(s=%s,r=%d,b=%s)", u.Source, u.Round, u.Block))
 	}
-	return fmt.Sprintf("(s=%s,r=%d,b=%s,strong=%s,weak=%s)", v.Source, v.Round, v.Block, strong, weak)
+	return fmt.Sprintf("(s=%s,r=%d,b=%s,vh=%s,strong=%s,weak=%s)", v.Source, v.Round, v.Block, v.VertexHash, strong, weak)
 }
 
 func (v BaseVertex) String() string {
 	return fmt.Sprintf("(s=%s,r=%d,b=%s)", v.Source, v.Round, v.Block)
 }
-
-func (v *Vertex)
