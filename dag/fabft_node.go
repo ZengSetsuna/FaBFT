@@ -37,12 +37,14 @@ type FabftNode struct {
 	timer             *time.Timer
 	timerTimeout      time.Duration
 	networkAssumption commons.NetworkAssumption
+	gpcShareSent      bool // if the threshold signature share of this round is already sent
 	// channels
 	VertexChannel  chan internal.BroadcastMessage[commons.Vertex, commons.Round]
 	VoteChannel    chan commons.Vote
 	BlockToPropose chan commons.Block
 	QCChannel      chan commons.QC
-	signatures     []collections.Set[string]
+	SignChannel    chan commons.SignShare
+	signatures     []string
 	// log
 	log *log.Entry
 }
@@ -74,8 +76,9 @@ func NewFabftNode(addr commons.Address, networkAssumption commons.NetworkAssumpt
 		networkAssumption:      networkAssumption,
 		peersMap:               collections.NewHashMap[commons.Address, *FabftNode](),
 		QCChannel:              make(chan commons.QC, 1024),
-		signatures:             make([]collections.Set[string], 0),
+		signatures:             make([]string, 0),
 		VoteChannel:            make(chan commons.Vote, 1024),
+		SignChannel:            make(chan commons.SignShare, 1024),
 	}
 	instance.peers = append(instance.peers, instance)
 	_ = instance.timer.Stop()
@@ -164,6 +167,7 @@ func (node *FabftNode) StartRoutine(ctx context.Context) {
 		go node.TimeoutRoutine(ctx)
 	} else {
 		go node.AsynchronousRoutine(ctx)
+		go node.ReceiveGPCSignatures(ctx)
 	}
 	go node.receiveQC(ctx)
 }
@@ -201,6 +205,8 @@ func (node *FabftNode) TimeoutRoutine(ctx context.Context) {
 }
 
 func (node *FabftNode) AsynchronousRoutine(ctx context.Context) {
+	node.newRound()
+	node.gpcShareSent = false
 	votesCount := 0
 	qc := commons.QC{
 		Signatures: make([]string, 0),
@@ -208,7 +214,6 @@ func (node *FabftNode) AsynchronousRoutine(ctx context.Context) {
 		Round:      0,
 		Sender:     node.NodeInfo.Address,
 	}
-	//node.asyncNewRound()
 	for {
 		select {
 		case vote := <-node.VoteChannel:
@@ -222,22 +227,35 @@ func (node *FabftNode) AsynchronousRoutine(ctx context.Context) {
 			}
 		case <-ctx.Done():
 			return
-		default:
-			continue
+		}
+	}
+}
+
+func (node *FabftNode) ReceiveGPCSignatures(ctx context.Context) {
+	for {
+		select {
+		case sig := <-node.SignChannel:
+			if sig.Round == node.round {
+				node.signatures = append(node.signatures, sig.Sign)
+			}
+			if len(node.signatures) >= node.n - node.f:
+
 		}
 	}
 }
 
 func (node *FabftNode) handleTimeout() {
 	//node.log.Debug("buffer size:", node.buffer.Size(), "round", node.round, "node.dag.GetRound(node.round).Size()", node.dag.GetRound(node.round).Size())
+	checkQCTimer := time.NewTimer(300 * time.Millisecond)
+	node.timer.Reset(node.timerTimeout)
 	node.newRound()
-	time.Sleep(300 * time.Millisecond)
+	<-checkQCTimer.C
 	qc := node.checkLastRoundVotes(node.round)
 	node.log.Println("qc generated for block:", qc.VertexHash)
 	if qc != nil {
 		go node.broadcastQC(*qc)
 	}
-	node.timer.Reset(node.timerTimeout)
+
 }
 
 func (node *FabftNode) generateVertex() *commons.Vertex {
@@ -309,10 +327,10 @@ func (node *FabftNode) checkQC(qc commons.QC) {
 		return
 	}
 	v, _ := node.buffer.Get(qc.VertexHash)
-	node.checkAncestors(v)
+	node.checkPrecursors(v)
 }
 
-func (node *FabftNode) checkAncestors(v *commons.Vertex) {
+func (node *FabftNode) checkPrecursors(v *commons.Vertex) {
 	lastRoundVertices := node.dag.GetRound(v.Round - 1).VertexMap()
 	missing := false
 	for _, ph := range v.PrevHashes {
@@ -320,6 +338,7 @@ func (node *FabftNode) checkAncestors(v *commons.Vertex) {
 			_ = node.descendantsWaiting.Put(ph, make(chan commons.VHash), false) // initialize channel for the first time
 			descendants, _ := node.descendantsWaiting.Get(ph)
 			descendants <- v.VertexHash
+			node.callForHelp(ph)
 			_ = node.missingAncestorsCount.Put(v.VertexHash, 0, false)
 			node.missingAncestorsCount.IncrementValueInt64(v.VertexHash, 1) // increment count of the missing ancestor
 			missing = true
@@ -397,7 +416,7 @@ func (node *FabftNode) checkLastRoundVotes(lastRound commons.Round) *commons.QC 
 	node.log.Println("valid votes received:", len(qc.Signatures))
 	if len(qc.Signatures)+1 > node.n-node.f {
 		v, _ := node.buffer.Get(qc.VertexHash)
-		go node.checkAncestors(v)
+		go node.checkPrecursors(v)
 		return qc
 	}
 	node.log.Println("timeout: not enough signatures for vertex on round:", lastRound)
@@ -428,6 +447,7 @@ func (node *FabftNode) broadcastQC(qc commons.QC) {
 func (node *FabftNode) newRound() {
 	node.round++ // new round
 	node.log.Debug("round started:", node.round)
+	node.signatures = make([]string, 0)
 	b := node.generateVertex()
 	node.log.Debug("round:", node.round, "block generated:", b.VertexHash, "prevHashes: ", b.PrevHashes)
 	node.broadcastVertex(b, node.round) // broadcast block to all peers
@@ -438,9 +458,16 @@ func (node *FabftNode) addToDag(v *commons.Vertex) {
 	node.dag.NewRoundIfNotExists(v.Round)
 	node.dag.GetRound(v.Round).AddVertex(*v)
 	fmt.Println("vertex added to dag, vh=", v.VertexHash, "round=", v.Round)
-	for _, pr := range v.PrevHashes {
-		copiedPr := pr
-		go node.commitToFasterLedger(copiedPr, v.Round-1)
+	if node.networkAssumption == commons.PartiallySynchronous {
+		for _, pr := range v.PrevHashes {
+			copiedPr := pr
+			go node.commitToFasterLedger(copiedPr, v.Round-1)
+		}
+	} else {
+		if !node.gpcShareSent && node.dag.GetRound(v.Round).Size() > node.n-node.f {
+			node.gpcShareSent = true
+			node.sendGPCSignature()
+		}
 	}
 }
 
@@ -451,4 +478,19 @@ func (node *FabftNode) commitToFasterLedger(vh commons.VHash, round commons.Roun
 
 func (node *FabftNode) commitToSaferLedger(vh commons.VHash, round commons.Round) {
 
+}
+
+func (node *FabftNode) callForHelp(vh commons.VHash, round commons.Round) {
+	for peer := range node.peers {
+		clonedPeer := peer
+
+	}
+}
+
+func (node *FabftNode) sendGPCSignature() {
+	sig := "signature of node:" + string(node.NodeInfo.Address) + " round: " + strconv.FormatInt(int64(node.round), 10)
+	for _, peer := range node.peers {
+		clonedPeer := peer
+		clonedPeer.SignChannel <- commons.SignShare{Sign: sig, Round: node.round}
+	}
 }
