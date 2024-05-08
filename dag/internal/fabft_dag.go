@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-type FabftDAG interface {
+type Fabftdag interface {
 	//VertexExist(v *commons.BaseVertex) bool
 	//AllEdgesExist(v *commons.Vertex) bool
 	NewRoundIfNotExists(r commons.Round)
@@ -24,6 +24,7 @@ type FabftVertexRoundSet interface {
 	//SetDelivered(a commons.Address, delivered bool)
 	Size() int
 	VertexMap() map[commons.VHash]commons.Vertex
+	GetByHash(vh commons.VHash) commons.Vertex
 }
 
 type fabftVertexRoundSet struct {
@@ -35,7 +36,7 @@ type fabftdag struct {
 	internal map[commons.Round]FabftVertexRoundSet
 }
 
-func NewFabftDAG() FabftDAG {
+func NewFabftDAG() Fabftdag {
 	return &fabftdag{
 		internal: make(map[commons.Round]FabftVertexRoundSet),
 	}
