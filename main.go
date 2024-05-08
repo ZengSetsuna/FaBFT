@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	testFabftPSync()
+	testFabftAsync()
 }
 
 func hookShutdownSignal(done chan struct{}) {
@@ -64,6 +64,26 @@ func testFabftPSync() {
 	n := 3
 	for i := 0; i < n; i++ {
 		ss = append(ss, dag.NewFabftNode(commons.Address(strconv.Itoa(i)), commons.PartiallySynchronous, 600*time.Millisecond))
+		ctxs = append(ctxs, context.Background())
+	}
+	for i := 0; i < n; i++ {
+		ss[i].SetPeers(ss)
+	}
+	for i := 0; i < n; i++ {
+		_ = ss[i].Start(ctxs[i])
+	}
+	time.Sleep(1 * time.Second)
+	done := make(chan struct{})
+	go hookShutdownSignal(done)
+	<-done
+}
+
+func testFabftAsync() {
+	ss := make([]*dag.FabftNode, 0)
+	ctxs := make([]context.Context, 0)
+	n := 4
+	for i := 0; i < n; i++ {
+		ss = append(ss, dag.NewFabftNode(commons.Address(strconv.Itoa(i)), commons.Asynchronous, 0))
 		ctxs = append(ctxs, context.Background())
 	}
 	for i := 0; i < n; i++ {

@@ -47,7 +47,8 @@ type FabftNode struct {
 	SignChannel          chan commons.SignShare
 	RequestHelpChannel   chan commons.HelpRequest
 	LateVertexChannel    chan commons.Vertex
-	signatures           []string
+	signatures           [][]string
+	CommittedSet         map[commons.VHash]bool
 	// log
 	log *log.Entry
 }
@@ -79,12 +80,13 @@ func NewFabftNode(addr commons.Address, networkAssumption commons.NetworkAssumpt
 		networkAssumption:      networkAssumption,
 		peersMap:               collections.NewHashMap[commons.Address, *FabftNode](),
 		QCChannel:              make(chan commons.QC, 1024),
-		signatures:             make([]string, 0),
+		signatures:             make([][]string, 0),
 		VoteChannel:            make(chan commons.Vote, 1024),
 		SignChannel:            make(chan commons.SignShare, 1024),
-		AsyncNewRoundChannel:   make(chan bool),
+		AsyncNewRoundChannel:   make(chan bool, 1),
 		RequestHelpChannel:     make(chan commons.HelpRequest, 1024),
 		LateVertexChannel:      make(chan commons.Vertex, 1024),
+		CommittedSet:           make(map[commons.VHash]bool),
 	}
 	instance.peers = append(instance.peers, instance)
 	_ = instance.timer.Stop()
@@ -189,7 +191,7 @@ func (node *FabftNode) ReceiveRoutine(ctx context.Context) {
 			go node.checkQC(qc)
 		case vertexMsg := <-node.VertexChannel:
 			node.log.Debug("receive message from VertexChannel", "p=", vertexMsg.P, "r=", vertexMsg.R, "m=", vertexMsg.Message)
-			go node.verifyVertexMsg(&vertexMsg)
+			node.verifyVertexMsg(&vertexMsg)
 		case helpRequest := <-node.RequestHelpChannel:
 			go node.replyHelpRequest(helpRequest)
 		/*case vMsg := <-node.VoteChannel:
@@ -214,30 +216,16 @@ func (node *FabftNode) TimeoutRoutine(ctx context.Context) {
 }
 
 func (node *FabftNode) AsynchronousRoutine(ctx context.Context) {
-	node.newRound()
-	node.gpcShareSent = false
-	votesCount := 0
-	qc := commons.QC{
-		Signatures: make([]string, 0),
-		VertexHash: 0,
-		Round:      0,
-		Sender:     node.NodeInfo.Address,
-	}
+	var votesCount int
+	var qc commons.QC
+	node.AsyncNewRoundChannel <- true
+	node.signatures = append(node.signatures, make([]string, 0))
 	for {
 		select {
-		case vote := <-node.VoteChannel:
-			if node.verifyVote(vote, node.round) {
-				qc.Signatures = append(qc.Signatures, vote.Signature)
-				qc.VertexHash = vote.Hash
-				votesCount++
-			}
-			if votesCount > len(node.peers)-node.f {
-				node.broadcastQC(qc)
-			}
 		case <-node.AsyncNewRoundChannel:
-			node.signatures = make([]string, 0) // flush previous signs
-			node.newRound()
 			node.gpcShareSent = false
+			node.signatures = append(node.signatures, make([]string, 0)) // flush previous signs
+			node.newRound()
 			votesCount = 0
 			qc = commons.QC{
 				Signatures: make([]string, 0),
@@ -245,23 +233,48 @@ func (node *FabftNode) AsynchronousRoutine(ctx context.Context) {
 				Round:      0,
 				Sender:     node.NodeInfo.Address,
 			}
+			break
 		case <-ctx.Done():
 			return
+		}
+		exitFlag := false
+		for !exitFlag {
+			select {
+			case vote := <-node.VoteChannel:
+				if node.verifyVote(vote, node.round) {
+					node.log.Println("vote received for:", vote.Hash)
+					if node.verifyVote(vote, node.round) {
+						qc.Signatures = append(qc.Signatures, vote.Signature)
+						qc.VertexHash = vote.Hash
+						votesCount++
+					}
+				}
+				if votesCount >= node.n-node.f {
+					node.broadcastQC(qc)
+					exitFlag = true
+					break
+				}
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
 
 func (node *FabftNode) ReceiveGPCSignatures(ctx context.Context) {
+	roundLeaderChosen := 0
 	for {
 		select {
 		case sig := <-node.SignChannel:
-			if sig.Round == node.round {
-				node.signatures = append(node.signatures, sig.Sign)
-			}
-			if len(node.signatures) >= node.n-node.f {
-				leader := node.SelectLeader(node.signatures)
+			node.signatures[sig.Round] = append(node.signatures[sig.Round], sig.Sign)
+			if len(node.signatures[node.round]) > node.n-node.f && roundLeaderChosen < int(node.round) {
+				leader := node.SelectLeader(node.signatures[sig.Round])
+				node.log.Println("leader: ", leader, "selected for round: ", node.round-1)
 				node.TryCommitLeaderAsync(leader, node.round-1)
+				roundLeaderChosen++
 			}
+		case <-ctx.Done():
+			return
 		}
 	}
 }
@@ -277,10 +290,12 @@ func (node *FabftNode) TryCommitLeaderAsync(leader commons.Address, round common
 		}
 	}
 	if !leaderVertexFound {
+		fmt.Println("block of leader: ", leader, " not found on round: ", round)
 		node.AsyncNewRoundChannel <- true
 		return // leader block hasn't been added to dag, no vertices committed
 	}
 	refCount := 0
+	node.log.Println()
 	for _, v := range node.dag.GetRound(round + 1).Entries() { // count references to leaderV on round+1
 		for _, vh := range v.PrevHashes {
 			if vh == leaderV.VertexHash {
@@ -289,13 +304,15 @@ func (node *FabftNode) TryCommitLeaderAsync(leader commons.Address, round common
 			}
 		}
 	}
-	if refCount < node.n-node.f {
-		node.AsyncNewRoundChannel <- true
-		return // no enough references, no vertices committed
+	if refCount >= node.n-node.f {
+		node.CommitPast(leaderV)
+	} else {
+		fmt.Println("no enough ref:", refCount)
 	}
-	node.CommitPast(leaderV)
+	node.AsyncNewRoundChannel <- true
 }
 
+/*
 func (node *FabftNode) CommitPast(v commons.Vertex) {
 	s := collections.NewStack[commons.Vertex]()
 	s.Push(v)
@@ -306,6 +323,22 @@ func (node *FabftNode) CommitPast(v commons.Vertex) {
 			prevV := node.dag.GetRound(curr.Round - 1).GetByHash(vh)
 			if !prevV.Delivered {
 				s.Push(prevV)
+			}
+		}
+	}
+}*/
+
+func (node *FabftNode) CommitPast(v commons.Vertex) {
+	s := make([]commons.Vertex, 0)
+	s = append(s, v)
+	for len(s) > 0 {
+		curr := s[len(s)-1]
+		s = s[:len(s)-1]
+		node.commitToSaferLedger(curr.VertexHash, curr.Round)
+		for _, vh := range curr.PrevHashes {
+			prevV := node.dag.GetRound(curr.Round - 1).GetByHash(vh)
+			if !node.CommittedSet[vh] {
+				s = append(s, prevV)
 			}
 		}
 	}
@@ -360,6 +393,7 @@ func (node *FabftNode) verifyVertexMsg(vm *internal.BroadcastMessage[commons.Ver
 		node.vote(true, sig, &vm.Message)
 	}
 	_ = node.buffer.Put(vm.Message.VertexHash, &vm.Message, true)
+	node.log.Println("vertex put into buffer:", vm.Message.VertexHash)
 }
 
 func (node *FabftNode) verifyVertex(v *commons.Vertex) bool {
@@ -388,6 +422,7 @@ func (node *FabftNode) checkQC(qc commons.QC) {
 		return
 	}
 	v, _ := node.buffer.Get(qc.VertexHash)
+	node.log.Println("check precursor for:", v)
 	node.checkPrecursors(v)
 }
 
@@ -411,9 +446,8 @@ func (node *FabftNode) checkPrecursors(v *commons.Vertex) {
 }
 
 func (node *FabftNode) checkDescendantsReady(v *commons.Vertex) {
-	_ = node.buffer.Delete(v.VertexHash)
-	node.log.Println("vertex added to DAG:", v.VertexHash)
 	node.addToDag(v)
+	_ = node.buffer.Delete(v.VertexHash)
 	descendants, _ := node.descendantsWaiting.Get(v.VertexHash)
 	descendantsReadyToAdd := make(chan *commons.Vertex, 1024)
 	defer close(descendantsReadyToAdd)
@@ -495,20 +529,15 @@ func (node *FabftNode) verifyVote(vote commons.Vote, round commons.Round) bool {
 func (node *FabftNode) broadcastQC(qc commons.QC) {
 	node.log.Debug("broadcasting QC for block:", qc.VertexHash, "in round", qc.Round)
 	for _, peer := range node.peers {
-		if peer.NodeInfo.Address != node.NodeInfo.Address {
-			clonedPeer := peer
-			/*go func() {
-				clonedPeer.QCChannel <- qc
-			}()*/
-			clonedPeer.QCChannel <- qc
-		}
+		clonedPeer := peer
+		clonedPeer.QCChannel <- qc
 	}
 }
 
 func (node *FabftNode) newRound() {
 	node.round++ // new round
-	node.log.Debug("round started:", node.round)
-	node.signatures = make([]string, 0)
+	node.log.Println("round started:", node.round)
+	node.signatures = append(node.signatures, make([]string, 0))
 	b := node.generateVertex()
 	node.log.Debug("round:", node.round, "block generated:", b.VertexHash, "prevHashes: ", b.PrevHashes)
 	node.broadcastVertex(b, node.round) // broadcast block to all peers
@@ -518,14 +547,14 @@ func (node *FabftNode) newRound() {
 func (node *FabftNode) addToDag(v *commons.Vertex) {
 	node.dag.NewRoundIfNotExists(v.Round)
 	node.dag.GetRound(v.Round).AddVertex(*v)
-	fmt.Println("vertex added to dag, vh=", v.VertexHash, "round=", v.Round)
+	node.log.Println("vertex added to dag, vh=", v.VertexHash, "round=", v.Round, "blocks of this round: ", node.dag.GetRound(v.Round).Size())
 	if node.networkAssumption == commons.PartiallySynchronous {
 		for _, pr := range v.PrevHashes {
 			copiedPr := pr
 			go node.commitToFasterLedger(copiedPr, v.Round-1)
 		}
 	} else {
-		if !node.gpcShareSent && node.dag.GetRound(v.Round).Size() > node.n-node.f {
+		if !node.gpcShareSent && node.dag.Size() > int(node.round) && node.dag.GetRound(node.round).Size() > node.n-node.f {
 			node.gpcShareSent = true
 			node.sendGPCSignature()
 		}
@@ -533,15 +562,13 @@ func (node *FabftNode) addToDag(v *commons.Vertex) {
 }
 
 func (node *FabftNode) commitToFasterLedger(vh commons.VHash, round commons.Round) {
-	v := node.dag.GetRound(round).VertexMap()[vh]
-	v.Delivered = true
+	node.CommittedSet[vh] = true
 	node.log.Println("block:", vh, "committed to the faster ledger at round:", round)
 
 }
 
 func (node *FabftNode) commitToSaferLedger(vh commons.VHash, round commons.Round) {
-	v := node.dag.GetRound(round).VertexMap()[vh]
-	v.Delivered = true
+	node.CommittedSet[vh] = true
 	node.log.Println("block:", vh, "committed to the safer ledger at round:", round)
 }
 
@@ -554,6 +581,7 @@ func (node *FabftNode) callForHelp(vh commons.VHash, round commons.Round) {
 
 func (node *FabftNode) sendGPCSignature() {
 	sig := "signature of node:" + string(node.NodeInfo.Address) + " round: " + strconv.FormatInt(int64(node.round), 10)
+	node.log.Println(sig)
 	for _, peer := range node.peers {
 		clonedPeer := peer
 		clonedPeer.SignChannel <- commons.SignShare{Sign: sig, Round: node.round}

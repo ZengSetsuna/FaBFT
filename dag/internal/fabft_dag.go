@@ -14,6 +14,7 @@ type Fabftdag interface {
 	GetRound(r commons.Round) FabftVertexRoundSet
 	//SetDelivered(v *commons.Vertex, delivered bool)
 	String() string
+	Size() int
 }
 
 type FabftVertexRoundSet interface {
@@ -40,6 +41,10 @@ func NewFabftDAG() Fabftdag {
 	return &fabftdag{
 		internal: make(map[commons.Round]FabftVertexRoundSet),
 	}
+}
+
+func (dag *fabftdag) Size() int {
+	return len(dag.internal)
 }
 
 /*func (dag *fabftdag) VertexExist(v *commons.BaseVertex) bool {

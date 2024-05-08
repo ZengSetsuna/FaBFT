@@ -63,7 +63,11 @@ func (v Vertex) String() string {
 	for _, u := range v.WeakEdgesValues() {
 		weak = append(weak, fmt.Sprintf("(s=%s,r=%d,b=%s)", u.Source, u.Round, u.Block))
 	}
-	return fmt.Sprintf("(s=%s,r=%d,b=%s,vh=%s,strong=%s,weak=%s)", v.Source, v.Round, v.Block, v.VertexHash, strong, weak)
+	phs := make([]string, 0, len(v.PrevHashes))
+	for _, u := range v.PrevHashes {
+		phs = append(phs, fmt.Sprintf("%d", u))
+	}
+	return fmt.Sprintf("(s=%s,r=%d,b=%s,vh=%s,strong=%s,weak=%s,prevHash=%s)", v.Source, v.Round, v.Block, v.VertexHash, strong, weak, phs)
 }
 
 func (v BaseVertex) String() string {
